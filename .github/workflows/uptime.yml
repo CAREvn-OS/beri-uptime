@@ -1,0 +1,45 @@
+name: live uptime
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions: {}
+concurrency: uptime
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      URL: https://studio.beri.global/api/build-info
+      EXPECTED: ${{ vars.LIVE_SHA }}
+      TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - name: fetch live build-info (two tries, 20 s each)
+        id: probe
+        run: |
+          set +e
+          for i in 1 2; do
+            out=$(curl -s -m 20 -w '\n%{http_code}' "$URL"); rc=$?
+            code=$(echo "$out" | tail -1); body=$(echo "$out" | sed '$d')
+            [ "$rc" = 0 ] && [ "$code" = 200 ] && break
+            sleep 20
+          done
+          sha=$(echo "$body" | grep -o '"sha":"[0-9a-f]\{8\}' | cut -c8-)
+          ver=$(echo "$body" | grep -o '"version":"[^"]*' | cut -c12-)
+          echo "code=$code" >> "$GITHUB_OUTPUT"; echo "sha=$sha" >> "$GITHUB_OUTPUT"; echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "live: http=$code sha=$sha version=$ver expected=$EXPECTED"
+      - name: alert when live is down
+        if: steps.probe.outputs.code != '200'
+        run: |
+          curl -s -m 15 -H "Title: BERI LIVE DOWN" -H "Priority: urgent" -H "Tags: rotating_light" \
+            -d "studio.beri.global answered ${{ steps.probe.outputs.code }} at $(TZ=Asia/Ho_Chi_Minh date '+%H:%M') ICT (checked from GitHub, two tries)." "https://ntfy.sh/$TOPIC"
+      - name: alert when the live version changed
+        if: steps.probe.outputs.code == '200' && env.EXPECTED != '' && steps.probe.outputs.sha != env.EXPECTED
+        run: |
+          curl -s -m 15 -H "Title: BERI live version changed" -H "Priority: high" -H "Tags: warning" \
+            -d "live now serves ${{ steps.probe.outputs.ver }} (${{ steps.probe.outputs.sha }}), expected $EXPECTED. $(TZ=Asia/Ho_Chi_Minh date '+%H:%M') ICT." "https://ntfy.sh/$TOPIC"
+  weekly-heartbeat:
+    if: github.event.schedule == '0 1 * * 0'
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'true'
