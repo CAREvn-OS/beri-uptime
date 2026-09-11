@@ -3,7 +3,8 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
-permissions: {}
+permissions:
+  issues: write
 concurrency: uptime
 jobs:
   check:
@@ -28,16 +29,37 @@ jobs:
           ver=$(echo "$body" | grep -o '"version":"[^"]*' | cut -c12-)
           echo "code=$code" >> "$GITHUB_OUTPUT"; echo "sha=$sha" >> "$GITHUB_OUTPUT"; echo "ver=$ver" >> "$GITHUB_OUTPUT"
           echo "live: http=$code sha=$sha version=$ver expected=$EXPECTED"
-      - name: alert when live is down
+      - name: alert when live is down (GitHub issue -> email)
         if: steps.probe.outputs.code != '200'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -s -m 15 -H "Title: BERI LIVE DOWN" -H "Priority: urgent" -H "Tags: rotating_light" \
-            -d "studio.beri.global answered ${{ steps.probe.outputs.code }} at $(TZ=Asia/Ho_Chi_Minh date '+%H:%M') ICT (checked from GitHub, two tries)." "https://ntfy.sh/$TOPIC"
-      - name: alert when the live version changed
+          when=$(TZ=Asia/Ho_Chi_Minh date '+%a %d %b %H:%M') ; code='${{ steps.probe.outputs.code }}'
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label down --state open --json number -q '.[0].number')
+          if [ -z "$open" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --label down --title "LIVE DOWN — studio.beri.global answered $code at $when ICT" \
+              --body "studio.beri.global/api/build-info did not answer HTTP 200 (got: $code) at $when ICT, checked from GitHub with two tries of 20 s. This issue closes itself when live answers again."
+          else
+            gh issue comment -R "$GITHUB_REPOSITORY" "$open" --body "still down: $code at $when ICT"
+          fi
+      - name: close the down issue when live is back
+        if: steps.probe.outputs.code == '200'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          when=$(TZ=Asia/Ho_Chi_Minh date '+%a %d %b %H:%M')
+          for n in $(gh issue list -R "$GITHUB_REPOSITORY" --label down --state open --json number -q '.[].number'); do
+            gh issue close -R "$GITHUB_REPOSITORY" "$n" --comment "live is back: HTTP 200, ${{ steps.probe.outputs.ver }} (${{ steps.probe.outputs.sha }}) at $when ICT"
+          done
+      - name: alert when the live version changed (GitHub issue -> email)
         if: steps.probe.outputs.code == '200' && env.EXPECTED != '' && steps.probe.outputs.sha != env.EXPECTED
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -s -m 15 -H "Title: BERI live version changed" -H "Priority: high" -H "Tags: warning" \
-            -d "live now serves ${{ steps.probe.outputs.ver }} (${{ steps.probe.outputs.sha }}), expected $EXPECTED. $(TZ=Asia/Ho_Chi_Minh date '+%H:%M') ICT." "https://ntfy.sh/$TOPIC"
+          when=$(TZ=Asia/Ho_Chi_Minh date '+%a %d %b %H:%M')
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label version --state open --json number -q '.[0].number')
+          [ -n "$open" ] || gh issue create -R "$GITHUB_REPOSITORY" --label version --title "live version changed: now ${{ steps.probe.outputs.ver }} (${{ steps.probe.outputs.sha }}), expected $EXPECTED" \
+              --body "Seen at $when ICT. If this was a planned lock-in, set the LIVE_SHA repo variable to ${{ steps.probe.outputs.sha }} and close this."
   weekly-heartbeat:
     if: github.event.schedule == '0 1 * * 0'
     runs-on: ubuntu-latest
